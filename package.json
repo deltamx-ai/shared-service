@@ -1,0 +1,24 @@
+{
+  "name": "shared-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared in-memory data bridge for Angular and React micro-frontends",
+  "license": "UNLICENSED",
+  "keywords": [
+    "angular",
+    "react",
+    "micro-frontend",
+    "shared-memory",
+    "service"
+  ],
+  "scripts": {
+    "lint": "echo \"No lint configured\"",
+    "test": "echo \"No tests configured\""
+  },
+  "peerDependencies": {
+    "@angular/core": ">=14.0.0"
+  },
+  "devDependencies": {
+    "typescript": ">=5.0.0"
+  }
+}
