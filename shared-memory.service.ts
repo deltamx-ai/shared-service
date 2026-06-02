@@ -1,34 +1,39 @@
-import { Injectable } from '@angular/core';
+import { Injectable, InjectionToken, inject } from '@angular/core';
 
 type SharedValue<T = any> = T;
 
-interface SharedStore {
+export interface SharedMemoryStore {
   values: Map<string, SharedValue>;
   promises: Map<string, Promise<SharedValue>>;
   resolvers: Map<string, (value: SharedValue) => void>;
 }
 
-declare global {
-  interface Window {
-    __SHARED_APP_MEMORY__?: SharedStore;
-  }
+export const SHARED_MEMORY_STORE = new InjectionToken<SharedMemoryStore>(
+  'SHARED_MEMORY_STORE'
+);
+
+export function createSharedMemoryStore(): SharedMemoryStore {
+  return {
+    values: new Map(),
+    promises: new Map(),
+    resolvers: new Map(),
+  };
 }
 
 @Injectable({
   providedIn: 'root',
 })
 export class SharedMemoryService {
-  private store: SharedStore = this.getStore();
+  private readonly store = inject(SHARED_MEMORY_STORE, { optional: true }) ?? createSharedMemoryStore();
 
-  private getStore(): SharedStore {
-    if (!window.__SHARED_APP_MEMORY__) {
-      window.__SHARED_APP_MEMORY__ = {
-        values: new Map(),
-        promises: new Map(),
-        resolvers: new Map(),
-      };
-    }
-    return window.__SHARED_APP_MEMORY__;
+  /**
+   * 基座初始化时把同一个 store 传进来。
+   * 这样多个子应用都能共享同一份内存对象，而不是挂到 window 上。
+   */
+  bindStore(store: SharedMemoryStore): void {
+    this.store.values = store.values;
+    this.store.promises = store.promises;
+    this.store.resolvers = store.resolvers;
   }
 
   /**
@@ -140,18 +145,19 @@ export class SharedMemoryService {
 }
 
 export const sharedMemory = {
-  set<T = any>(key: string, value: T) {
-    window.__SHARED_APP_MEMORY__ ||= {
-      values: new Map(),
-      promises: new Map(),
-      resolvers: new Map(),
-    };
-    window.__SHARED_APP_MEMORY__.values.set(key, value);
+  createStore: createSharedMemoryStore,
+  set<T = any>(store: SharedMemoryStore, key: string, value: T) {
+    store.values.set(key, value);
   },
-  get<T = any>(key: string): T | undefined {
-    return window.__SHARED_APP_MEMORY__?.values.get(key) as T | undefined;
+  get<T = any>(store: SharedMemoryStore, key: string): T | undefined {
+    return store.values.get(key) as T | undefined;
   },
-  has(key: string): boolean {
-    return !!window.__SHARED_APP_MEMORY__?.values.has(key);
+  has(store: SharedMemoryStore, key: string): boolean {
+    return store.values.has(key);
+  },
+  bind(target: SharedMemoryStore, source: SharedMemoryStore) {
+    target.values = source.values;
+    target.promises = source.promises;
+    target.resolvers = source.resolvers;
   },
 };

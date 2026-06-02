@@ -1,67 +1,68 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
-declare global {
-  interface Window {
-    __SHARED_APP_MEMORY__?: {
-      values: Map<string, any>;
-      promises: Map<string, Promise<any>>;
-      resolvers: Map<string, (value: any) => void>;
-    };
-  }
+export interface SharedMemoryStore {
+  values: Map<string, any>;
+  promises: Map<string, Promise<any>>;
+  resolvers: Map<string, (value: any) => void>;
 }
 
-export function setSharedData<T = any>(key: string, value: T) {
-  window.__SHARED_APP_MEMORY__ ||= {
+export function createSharedMemoryStore(): SharedMemoryStore {
+  return {
     values: new Map(),
     promises: new Map(),
     resolvers: new Map(),
   };
-  window.__SHARED_APP_MEMORY__.values.set(key, value);
 }
 
-export function getSharedData<T = any>(key: string): T | undefined {
-  return window.__SHARED_APP_MEMORY__?.values.get(key) as T | undefined;
+export function setSharedData<T = any>(store: SharedMemoryStore, key: string, value: T) {
+  store.values.set(key, value);
+
+  const resolve = store.resolvers.get(key);
+  if (resolve) {
+    resolve(value);
+    store.resolvers.delete(key);
+  }
+
+  store.promises.delete(key);
 }
 
-export function waitSharedData<T = any>(key: string): Promise<T> {
-  const existed = window.__SHARED_APP_MEMORY__?.values.get(key);
+export function getSharedData<T = any>(store: SharedMemoryStore, key: string): T | undefined {
+  return store.values.get(key) as T | undefined;
+}
+
+export function waitSharedData<T = any>(store: SharedMemoryStore, key: string): Promise<T> {
+  const existed = store.values.get(key);
   if (existed !== undefined) {
     return Promise.resolve(existed as T);
   }
 
-  window.__SHARED_APP_MEMORY__ ||= {
-    values: new Map(),
-    promises: new Map(),
-    resolvers: new Map(),
-  };
-
-  const running = window.__SHARED_APP_MEMORY__.promises.get(key);
+  const running = store.promises.get(key);
   if (running) {
     return running as Promise<T>;
   }
 
   const p = new Promise<T>((resolve) => {
-    window.__SHARED_APP_MEMORY__!.resolvers.set(key, resolve as (value: any) => void);
+    store.resolvers.set(key, resolve as (value: any) => void);
   });
 
-  window.__SHARED_APP_MEMORY__.promises.set(key, p as Promise<any>);
+  store.promises.set(key, p as Promise<any>);
   return p;
 }
 
-export function SharedDataViewer() {
+export function SharedDataViewer({ store }: { store: SharedMemoryStore }) {
   const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
-    const cached = getSharedData('userInfo');
+    const cached = getSharedData(store, 'userInfo');
     if (cached) {
       setUser(cached);
       return;
     }
 
-    waitSharedData('userInfo').then((data) => {
+    waitSharedData(store, 'userInfo').then((data) => {
       setUser(data);
     });
-  }, []);
+  }, [store]);
 
   return (
     <div>
@@ -71,12 +72,15 @@ export function SharedDataViewer() {
   );
 }
 
-// 如果你在 React 子应用里，想接收 Angular 主应用塞进来的 Promise 结果：
-//
-// setSharedData('userInfo', { id: 1, name: 'Tom' })
-//
-// 或者：
-//
-// fetch('/api/user')
-//   .then(res => res.json())
-//   .then(data => setSharedData('userInfo', data))
+export function Demo() {
+  const store = useMemo(() => createSharedMemoryStore(), []);
+
+  useEffect(() => {
+    setSharedData(store, 'userInfo', { id: 1, name: 'Tom' });
+  }, [store]);
+
+  return <SharedDataViewer store={store} />;
+}
+
+// 基座把同一个 store 对象传给 Angular 和 React。
+// 这样数据不是挂在 window 上，而是挂在应用注入出来的共享对象上。
