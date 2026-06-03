@@ -48,27 +48,63 @@ const reactStore = store;
 
 ---
 
+## 类型和 schema
+
+这套方案里，**类型和运行时校验是一体的**。
+
+我们在 `shared-contract.ts` 里只维护一份共享契约：
+
+- `sharedSchemas`：运行时 schema
+- `SharedDataMap`：从 schema 自动推导出来的 TS 类型
+
+也就是说：
+
+- 基座和子应用都依赖同一份契约
+- 数据写入时会做 schema 校验
+- 读取时有完整的类型提示
+- 类型变了，只改一处
+
+### 例子
+
+```ts
+export const sharedSchemas = {
+  userInfo: z.object({
+    id: z.number(),
+    name: z.string(),
+  }),
+  token: z.string(),
+} as const;
+
+export type SharedDataMap = {
+  [K in keyof typeof sharedSchemas]: z.infer<(typeof sharedSchemas)[K]>;
+};
+```
+
+---
+
 ## 工作流程图
 
 ```mermaid
 flowchart LR
   A[基座应用创建 sharedStore] --> B[把同一个 store 传给 Angular]
   A --> C[把同一个 store 传给 React]
-  B --> D[Angular 请求接口并 set 到 store]
-  D --> E[数据写入 values Map]
-  C --> F[React 读取 store]
-  F --> G{值是否已存在?}
-  G -- 是 --> H[直接 get 到数据]
-  G -- 否 --> I[wait 等待 Promise]
-  D --> J[set 时唤醒等待中的 resolver]
+  B --> D[Angular 拿接口数据]
+  D --> E[写入前先经过 schema 校验]
+  E --> F[数据写入 values Map]
+  C --> G[React 读取 store]
+  G --> H{值是否已存在?}
+  H -- 是 --> I[直接 get 到数据]
+  H -- 否 --> J[wait 等待 Promise]
+  F --> K[set 时唤醒等待中的 resolver]
+  K --> J
   J --> I
-  I --> H
 ```
 
 ---
 
 ## 文件
 
+- `shared-contract.ts`：共享类型契约 + schema
 - `shared-memory.service.ts`：Angular 侧服务
 - `react-usage-example.tsx`：React 侧示例
 
@@ -137,6 +173,8 @@ waitSharedData(store, 'userInfo').then((data) => {
 - 更适合微前端基座控制
 - 子应用之间共享同一个内存对象
 - `Promise` 可以配合等待机制，避免重复请求
+- 有 schema 校验，避免脏数据直接进入共享 store
+- 类型从 schema 自动推导，不用维护两套
 
 ---
 

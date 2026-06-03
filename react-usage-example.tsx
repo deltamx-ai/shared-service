@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { SharedDataMap, SharedKey, safeValidateSharedValue } from './shared-contract';
 
 export interface SharedMemoryStore {
   values: Map<string, any>;
   promises: Map<string, Promise<any>>;
-  resolvers: Map<string, (value: any) => void>;
+  resolvers: Map<string, Array<(value: any) => void>>;
 }
 
 export function createSharedMemoryStore(): SharedMemoryStore {
@@ -14,35 +15,66 @@ export function createSharedMemoryStore(): SharedMemoryStore {
   };
 }
 
-export function setSharedData<T = any>(store: SharedMemoryStore, key: string, value: T) {
-  store.values.set(key, value);
+export function setSharedData<K extends SharedKey>(store: SharedMemoryStore, key: K, value: SharedDataMap[K]) {
+  const result = safeValidateSharedValue(key, value);
+  if (!result.success) {
+    throw result.error;
+  }
 
-  const resolve = store.resolvers.get(key);
-  if (resolve) {
-    resolve(value);
+  store.values.set(key, result.data);
+
+  const resolvers = store.resolvers.get(key);
+  if (resolvers?.length) {
+    resolvers.forEach((resolve) => resolve(result.data));
     store.resolvers.delete(key);
   }
 
   store.promises.delete(key);
 }
 
-export function getSharedData<T = any>(store: SharedMemoryStore, key: string): T | undefined {
-  return store.values.get(key) as T | undefined;
+export function getSharedData<K extends SharedKey>(store: SharedMemoryStore, key: K): SharedDataMap[K] | undefined {
+  return store.values.get(key) as SharedDataMap[K] | undefined;
 }
 
-export function waitSharedData<T = any>(store: SharedMemoryStore, key: string): Promise<T> {
+export function waitSharedData<K extends SharedKey>(store: SharedMemoryStore, key: K): Promise<SharedDataMap[K]> {
   const existed = store.values.get(key);
   if (existed !== undefined) {
-    return Promise.resolve(existed as T);
+    return Promise.resolve(existed as SharedDataMap[K]);
   }
 
   const running = store.promises.get(key);
   if (running) {
-    return running as Promise<T>;
+    return running as Promise<SharedDataMap[K]>;
   }
 
-  const p = new Promise<T>((resolve) => {
-    store.resolvers.set(key, resolve as (value: any) => void);
+  const p = new Promise<SharedDataMap[K]>((resolve) => {
+    const list = store.resolvers.get(key) ?? [];
+    list.push(resolve as (value: any) => void);
+    store.resolvers.set(key, list);
+  });
+
+  store.promises.set(key, p as Promise<any>);
+  return p;
+}
+
+export async function setSharedDataByPromise<K extends SharedKey>(
+  store: SharedMemoryStore,
+  key: K,
+  source: Promise<unknown>
+): Promise<SharedDataMap[K]> {
+  const existed = store.values.get(key);
+  if (existed !== undefined) {
+    return existed as SharedDataMap[K];
+  }
+
+  const running = store.promises.get(key);
+  if (running) {
+    return running as Promise<SharedDataMap[K]>;
+  }
+
+  const p = source.then((value) => {
+    setSharedData(store, key, value as SharedDataMap[K]);
+    return getSharedData(store, key)!;
   });
 
   store.promises.set(key, p as Promise<any>);
@@ -50,7 +82,7 @@ export function waitSharedData<T = any>(store: SharedMemoryStore, key: string): 
 }
 
 export function SharedDataViewer({ store }: { store: SharedMemoryStore }) {
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<SharedDataMap['userInfo'] | null>(null);
 
   useEffect(() => {
     const cached = getSharedData(store, 'userInfo');

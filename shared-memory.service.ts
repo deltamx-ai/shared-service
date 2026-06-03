@@ -1,11 +1,12 @@
 import { Injectable, InjectionToken, inject } from '@angular/core';
+import { SharedDataMap, SharedKey, safeValidateSharedValue } from './shared-contract';
 
 type SharedValue<T = any> = T;
 
 export interface SharedMemoryStore {
   values: Map<string, SharedValue>;
   promises: Map<string, Promise<SharedValue>>;
-  resolvers: Map<string, (value: SharedValue) => void>;
+  resolvers: Map<string, Array<(value: SharedValue) => void>>;
 }
 
 export const SHARED_MEMORY_STORE = new InjectionToken<SharedMemoryStore>(
@@ -37,14 +38,19 @@ export class SharedMemoryService {
   }
 
   /**
-   * 直接写入内存
+   * 直接写入内存，写入前会做 schema 校验
    */
-  set<T = any>(key: string, value: T): void {
-    this.store.values.set(key, value);
+  set<K extends SharedKey>(key: K, value: unknown): void {
+    const result = safeValidateSharedValue(key, value);
+    if (!result.success) {
+      throw result.error;
+    }
 
-    const resolve = this.store.resolvers.get(key);
-    if (resolve) {
-      resolve(value);
+    this.store.values.set(key, result.data);
+
+    const resolvers = this.store.resolvers.get(key);
+    if (resolvers?.length) {
+      resolvers.forEach((resolve) => resolve(result.data));
       this.store.resolvers.delete(key);
     }
 
@@ -54,14 +60,14 @@ export class SharedMemoryService {
   /**
    * 从内存读取
    */
-  get<T = any>(key: string): T | undefined {
-    return this.store.values.get(key) as T | undefined;
+  get<K extends SharedKey>(key: K): SharedDataMap[K] | undefined {
+    return this.store.values.get(key) as SharedDataMap[K] | undefined;
   }
 
   /**
    * 判断是否已有值
    */
-  has(key: string): boolean {
+  has<K extends SharedKey>(key: K): boolean {
     return this.store.values.has(key);
   }
 
@@ -69,19 +75,21 @@ export class SharedMemoryService {
    * 等待某个 key 有值
    * 如果已经有值，直接返回
    */
-  wait<T = any>(key: string): Promise<T> {
+  wait<K extends SharedKey>(key: K): Promise<SharedDataMap[K]> {
     const existed = this.store.values.get(key);
     if (existed !== undefined) {
-      return Promise.resolve(existed as T);
+      return Promise.resolve(existed as SharedDataMap[K]);
     }
 
     const existedPromise = this.store.promises.get(key);
     if (existedPromise) {
-      return existedPromise as Promise<T>;
+      return existedPromise as Promise<SharedDataMap[K]>;
     }
 
-    const promise = new Promise<T>((resolve) => {
-      this.store.resolvers.set(key, resolve as (value: SharedValue) => void);
+    const promise = new Promise<SharedDataMap[K]>((resolve) => {
+      const list = this.store.resolvers.get(key) ?? [];
+      list.push(resolve as (value: SharedValue) => void);
+      this.store.resolvers.set(key, list);
     });
 
     this.store.promises.set(key, promise as Promise<SharedValue>);
@@ -91,21 +99,22 @@ export class SharedMemoryService {
   /**
    * 传入 Promise，结果会自动缓存到内存
    * 如果已经缓存过，直接返回缓存值
+   * 写入前会经过 schema 校验
    */
-  async setByPromise<T = any>(key: string, source: Promise<T>): Promise<T> {
+  async setByPromise<K extends SharedKey>(key: K, source: Promise<unknown>): Promise<SharedDataMap[K]> {
     const existed = this.store.values.get(key);
     if (existed !== undefined) {
-      return existed as T;
+      return existed as SharedDataMap[K];
     }
 
     const running = this.store.promises.get(key);
     if (running) {
-      return running as Promise<T>;
+      return running as Promise<SharedDataMap[K]>;
     }
 
     const p = source.then((value) => {
       this.set(key, value);
-      return value;
+      return this.get(key)!;
     });
 
     this.store.promises.set(key, p as Promise<SharedValue>);
@@ -117,8 +126,8 @@ export class SharedMemoryService {
    * - 有缓存就直接返回
    * - 没缓存就执行 Promise 并缓存
    */
-  async ensure<T = any>(key: string, source: Promise<T>): Promise<T> {
-    const existed = this.get<T>(key);
+  async ensure<K extends SharedKey>(key: K, source: Promise<unknown>): Promise<SharedDataMap[K]> {
+    const existed = this.get(key);
     if (existed !== undefined) {
       return existed;
     }
@@ -128,7 +137,7 @@ export class SharedMemoryService {
   /**
    * 删除某个 key
    */
-  remove(key: string): void {
+  remove<K extends SharedKey>(key: K): void {
     this.store.values.delete(key);
     this.store.promises.delete(key);
     this.store.resolvers.delete(key);
@@ -146,13 +155,17 @@ export class SharedMemoryService {
 
 export const sharedMemory = {
   createStore: createSharedMemoryStore,
-  set<T = any>(store: SharedMemoryStore, key: string, value: T) {
-    store.values.set(key, value);
+  set<K extends SharedKey>(store: SharedMemoryStore, key: K, value: SharedDataMap[K]) {
+    const result = safeValidateSharedValue(key, value);
+    if (!result.success) {
+      throw result.error;
+    }
+    store.values.set(key, result.data);
   },
-  get<T = any>(store: SharedMemoryStore, key: string): T | undefined {
-    return store.values.get(key) as T | undefined;
+  get<K extends SharedKey>(store: SharedMemoryStore, key: K): SharedDataMap[K] | undefined {
+    return store.values.get(key) as SharedDataMap[K] | undefined;
   },
-  has(store: SharedMemoryStore, key: string): boolean {
+  has(store: SharedMemoryStore, key: SharedKey): boolean {
     return store.values.has(key);
   },
   bind(target: SharedMemoryStore, source: SharedMemoryStore) {
