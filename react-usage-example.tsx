@@ -10,7 +10,7 @@ export interface SharedMemoryChange<T = any> {
   error?: unknown;
   updatedAt: number;
   version: number;
-  action: 'set' | 'loading' | 'error' | 'remove' | 'clear';
+  action: 'init' | 'set' | 'loading' | 'error' | 'remove' | 'clear';
   previousValue?: T;
 }
 
@@ -28,6 +28,8 @@ export interface SharedMemoryStore {
   errors: Map<string, unknown>;
   subscribers: Map<string, Set<(event: SharedMemoryChange) => void>>;
   versions: Map<string, number>;
+  updatedAt: Map<string, number>;
+  epochs: Map<string, number>;
 }
 
 function now(): number {
@@ -43,6 +45,8 @@ export function createSharedMemoryStore(): SharedMemoryStore {
     errors: new Map(),
     subscribers: new Map(),
     versions: new Map(),
+    updatedAt: new Map(),
+    epochs: new Map(),
   };
 }
 
@@ -59,6 +63,31 @@ function emit<T>(store: SharedMemoryStore, event: SharedMemoryChange<T>) {
   });
 }
 
+function nextEpoch(store: SharedMemoryStore, key: SharedKey): number {
+  const next = (store.epochs.get(key) ?? 0) + 1;
+  store.epochs.set(key, next);
+  return next;
+}
+
+function bumpMeta(store: SharedMemoryStore, key: SharedKey) {
+  const version = (store.versions.get(key) ?? 0) + 1;
+  const updatedAt = now();
+  store.versions.set(key, version);
+  store.updatedAt.set(key, updatedAt);
+  return { version, updatedAt };
+}
+
+function rejectWaiters(store: SharedMemoryStore, key: SharedKey, error: unknown) {
+  const resolvers = store.resolvers.get(key);
+  if (!resolvers?.length) return;
+
+  resolvers.forEach(({ reject, timer }) => {
+    if (timer) clearTimeout(timer);
+    reject(error);
+  });
+  store.resolvers.delete(key);
+}
+
 export function setSharedData<K extends SharedKey>(store: SharedMemoryStore, key: K, value: SharedDataMap[K]) {
   const result = safeValidateSharedValue(key, value);
   if (!result.success) {
@@ -66,9 +95,9 @@ export function setSharedData<K extends SharedKey>(store: SharedMemoryStore, key
   }
 
   const previousValue = store.values.get(key) as SharedDataMap[K] | undefined;
-  const version = (store.versions.get(key) ?? 0) + 1;
+  nextEpoch(store, key);
+  const { version, updatedAt } = bumpMeta(store, key);
 
-  store.versions.set(key, version);
   store.values.set(key, result.data);
   store.statuses.set(key, 'ready');
   store.errors.delete(key);
@@ -88,7 +117,7 @@ export function setSharedData<K extends SharedKey>(store: SharedMemoryStore, key
     status: 'ready',
     value: result.data,
     error: undefined,
-    updatedAt: now(),
+    updatedAt,
     version,
     action: 'set',
     previousValue,
@@ -97,8 +126,9 @@ export function setSharedData<K extends SharedKey>(store: SharedMemoryStore, key
 
 export function setSharedLoading<K extends SharedKey>(store: SharedMemoryStore, key: K) {
   const previousValue = store.values.get(key) as SharedDataMap[K] | undefined;
-  const version = (store.versions.get(key) ?? 0) + 1;
-  store.versions.set(key, version);
+  nextEpoch(store, key);
+  const { version, updatedAt } = bumpMeta(store, key);
+
   store.statuses.set(key, 'loading');
   store.errors.delete(key);
   store.promises.delete(key);
@@ -108,7 +138,7 @@ export function setSharedLoading<K extends SharedKey>(store: SharedMemoryStore, 
     status: 'loading',
     value: previousValue,
     error: undefined,
-    updatedAt: now(),
+    updatedAt,
     version,
     action: 'loading',
     previousValue,
@@ -117,27 +147,21 @@ export function setSharedLoading<K extends SharedKey>(store: SharedMemoryStore, 
 
 export function setSharedError<K extends SharedKey>(store: SharedMemoryStore, key: K, error: unknown) {
   const previousValue = store.values.get(key) as SharedDataMap[K] | undefined;
-  const version = (store.versions.get(key) ?? 0) + 1;
-  store.versions.set(key, version);
+  nextEpoch(store, key);
+  const { version, updatedAt } = bumpMeta(store, key);
+
   store.statuses.set(key, 'error');
   store.errors.set(key, error);
   store.promises.delete(key);
 
-  const resolvers = store.resolvers.get(key);
-  if (resolvers?.length) {
-    resolvers.forEach(({ reject, timer }) => {
-      if (timer) clearTimeout(timer);
-      reject(error);
-    });
-    store.resolvers.delete(key);
-  }
+  rejectWaiters(store, key, error);
 
   emit(store, {
     key,
     status: 'error',
     value: previousValue,
     error,
-    updatedAt: now(),
+    updatedAt,
     version,
     action: 'error',
     previousValue,
@@ -167,15 +191,16 @@ export function subscribeSharedData<K extends SharedKey>(
   store.subscribers.set(key, listeners);
 
   if (options.emitCurrent !== false) {
-    const value = store.values.get(key) as SharedDataMap[K] | undefined;
+    const currentValue = store.values.get(key) as SharedDataMap[K] | undefined;
     listener({
       key,
       status: getSharedStatus(store, key),
-      value,
+      value: currentValue,
       error: store.errors.get(key),
-      updatedAt: now(),
+      updatedAt: store.updatedAt.get(key) ?? now(),
       version: store.versions.get(key) ?? 0,
-      action: 'set',
+      action: 'init',
+      previousValue: currentValue,
     } as SharedMemoryChange<SharedDataMap[K]>);
   }
 
@@ -248,14 +273,21 @@ export async function setSharedDataByPromise<K extends SharedKey>(
   if (running) return running as Promise<SharedDataMap[K]>;
 
   setSharedLoading(store, key);
+  const epoch = store.epochs.get(key) ?? 0;
   const sourcePromise = typeof source === 'function' ? source() : source;
   const p = sourcePromise
     .then((value) => {
+      if ((store.epochs.get(key) ?? 0) !== epoch) {
+        throw new Error(`shared key "${String(key)}" 已失效`);
+      }
+
       setSharedData(store, key, value as SharedDataMap[K]);
       return getSharedData(store, key)!;
     })
     .catch((error) => {
-      setSharedError(store, key, error);
+      if ((store.epochs.get(key) ?? 0) === epoch) {
+        setSharedError(store, key, error);
+      }
       throw error;
     });
 

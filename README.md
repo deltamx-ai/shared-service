@@ -60,6 +60,10 @@ const reactStore = store;
 - `setLoading(...)` 先挂对象，后补数据
 - `setError(...)` 失败态回传
 - `setByPromise(...) / ensure(...)` 统一异步写入
+- `remove / clear` 会主动终止等待中的 promise，不会把人晾成 pending
+- 首次订阅会发 `init` 事件，里面带当前快照
+- `updatedAt` 会稳定保存在 store 里，不会每次读都变
+- 异步写入会用 epoch 防串台，`wait` 和 `setByPromise` 不会互相把状态搞乱
 
 这就比较像“共享一个对象壳子”，壳子先放出去，数据之后慢慢挂上来。
 
@@ -154,7 +158,7 @@ async loadUser() {
 
 this.sharedMemory.setLoading('userInfo');
 this.sharedMemory.subscribe('userInfo', (event) => {
-  console.log(event.status, event.value, event.error);
+  console.log(event.action, event.status, event.value, event.error);
 });
 ```
 
@@ -183,7 +187,7 @@ waitSharedData(store, 'userInfo', { timeoutMs: 3000 })
   });
 
 subscribeSharedData(store, 'userInfo', (event) => {
-  console.log(event.status, event.value, event.error);
+  console.log(event.action, event.status, event.value, event.error);
 });
 ```
 
@@ -199,6 +203,7 @@ subscribeSharedData(store, 'userInfo', (event) => {
 - 类型从 schema 自动推导，不用维护两套
 - 有 loading / error / ready 状态，UI 能直接接住
 - 支持订阅变更，后续挂载数据很顺手
+- remove / clear 不会留悬空等待
 
 ---
 
