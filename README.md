@@ -13,9 +13,14 @@
 - 有些共享对象一开始还没数据，得先占位，后面子项目再把数据补上
 - 其他人还要能知道它现在是 loading 还是 error，不能瞎猜
 
-所以我们让**基座应用**创建一个共享 `store`，再把同一个 `store` 实例传给 Angular 和 React 子应用。
+所以现在这套会更明确一点：
 
-大家拿到的是**同一份对象引用**，所以谁写进去，谁都能读到。
+- **基座负责写**：准备 init / fetch / set / error / clear
+- **子应用负责读**：只管 `get / wait / subscribe`
+- 子应用不要自己发起“谁先写谁后写”的竞赛
+- 真正的数据入口，应该收敛在基座那边
+
+这就比较像“基座发货，子应用收货”。
 
 ---
 
@@ -44,9 +49,33 @@ const reactStore = store;
 
 所以：
 
-- Angular `set` 一次
-- React 再 `get`
+- 基座 `set` 一次
+- 子应用再 `get`
 - 拿到的就是同一份数据
+
+---
+
+## 新的分工
+
+### 基座侧
+
+基座负责：
+
+- `init(key)`：先把这个 key 标成 loading，告诉外界“这个东西正在准备”
+- `load(key, source)`：自己发起请求，回写到共享对象
+- `set(key, value)`：直接塞值
+- `setError(key, error)`：把错误也挂上去
+- `remove / clear`：终止当前 key 的所有等待
+
+### 子应用侧
+
+子应用只做这些：
+
+- `get(key)`：读当前值
+- `wait(key)`：等值准备好
+- `subscribe(key)`：看变化
+
+子应用不要去抢“这个对象到底谁来 fetch”。那是基座的活。
 
 ---
 
@@ -57,13 +86,12 @@ const reactStore = store;
 - `loading / error / ready / idle` 状态
 - `wait(..., { timeoutMs })` 超时等待
 - `subscribe(...)` 订阅变更
-- `setLoading(...)` 先挂对象，后补数据
-- `setError(...)` 失败态回传
-- `setByPromise(...) / ensure(...)` 统一异步写入
+- `init(...)` 先挂对象
+- `load(...) / set(...)` 由基座写入
 - `remove / clear` 会主动终止等待中的 promise，不会把人晾成 pending
 - 首次订阅会发 `init` 事件，里面带当前快照
 - `updatedAt` 会稳定保存在 store 里，不会每次读都变
-- 异步写入会用 epoch 防串台，`wait` 和 `setByPromise` 不会互相把状态搞乱
+- 异步写入会用 epoch 防串台，`wait` 和 `load` 不会互相把状态搞乱
 
 这就比较像“共享一个对象壳子”，壳子先放出去，数据之后慢慢挂上来。
 
@@ -107,18 +135,15 @@ export type SharedDataMap = {
 
 ```mermaid
 flowchart LR
-  A[基座应用创建 sharedStore] --> B[把同一个 store 传给 Angular]
-  A --> C[把同一个 store 传给 React]
-  B --> D[Angular 拿接口数据]
-  D --> E[写入前先经过 schema 校验]
-  E --> F[数据写入 values Map]
-  C --> G[React 读取 store]
-  G --> H{值是否已存在?}
-  H -- 是 --> I[直接 get 到数据]
-  H -- 否 --> J[wait 等待 Promise / 订阅变更]
-  F --> K[set 时唤醒等待中的 resolver]
-  K --> J
-  J --> I
+  A[基座应用创建 sharedStore] --> B[基座 init key]
+  B --> C[基座 fetch 数据]
+  C --> D[基座 set / load 写回 store]
+  D --> E[子应用 get / wait / subscribe]
+  E --> F{值是否已存在?}
+  F -- 是 --> G[直接读到数据]
+  F -- 否 --> H[等待 Promise / 订阅变更]
+  D --> H
+  H --> G
 ```
 
 ---
@@ -137,27 +162,19 @@ flowchart LR
 
 ```ts
 const store = createSharedMemoryStore();
+const reader = sharedMemory.reader(store);
+const writer = sharedMemory.writer(store);
+
+writer.init('userInfo');
+writer.load('userInfo', fetch('/api/user').then(res => res.json()));
 ```
 
-然后在 Angular 里把它注入进去：
+子应用只读：
 
 ```ts
-providers: [
-  { provide: SHARED_MEMORY_STORE, useValue: store }
-]
-```
-
-在服务里直接使用：
-
-```ts
-constructor(private sharedMemory: SharedMemoryService) {}
-
-async loadUser() {
-  await this.sharedMemory.ensure('userInfo', fetch('/api/user').then(res => res.json()));
-}
-
-this.sharedMemory.setLoading('userInfo');
-this.sharedMemory.subscribe('userInfo', (event) => {
+const user = reader.get('userInfo');
+const ready = await reader.wait('userInfo', { timeoutMs: 3000 });
+reader.subscribe('userInfo', (event) => {
   console.log(event.action, event.status, event.value, event.error);
 });
 ```
@@ -170,15 +187,19 @@ React 子应用拿到同一个 store 后，直接读：
 
 ```tsx
 const store = createSharedMemoryStore();
-setSharedLoading(store, 'userInfo');
-setSharedData(store, 'userInfo', { id: 1, name: 'Tom' });
-const user = getSharedData(store, 'userInfo');
+const reader = createSharedReader(store);
+const writer = createSharedWriter(store);
+
+writer.init('userInfo');
+writer.load('userInfo', fetch('/api/user').then(res => res.json()));
+
+const user = reader.get('userInfo');
 ```
 
 如果数据还没回来：
 
 ```tsx
-waitSharedData(store, 'userInfo', { timeoutMs: 3000 })
+reader.wait('userInfo', { timeoutMs: 3000 })
   .then((data) => {
     console.log(data);
   })
@@ -186,7 +207,7 @@ waitSharedData(store, 'userInfo', { timeoutMs: 3000 })
     console.error('wait timeout or error', err);
   });
 
-subscribeSharedData(store, 'userInfo', (event) => {
+reader.subscribe('userInfo', (event) => {
   console.log(event.action, event.status, event.value, event.error);
 });
 ```
@@ -204,6 +225,7 @@ subscribeSharedData(store, 'userInfo', (event) => {
 - 有 loading / error / ready 状态，UI 能直接接住
 - 支持订阅变更，后续挂载数据很顺手
 - remove / clear 不会留悬空等待
+- 责任边界更清楚：基座写，子应用读
 
 ---
 
@@ -214,6 +236,7 @@ subscribeSharedData(store, 'userInfo', (event) => {
 - 刷新页面后，store 需要由基座重新创建并重新注入
 - 它是运行时共享，不是持久化存储
 - `wait` 可以超时，但它不是消息队列；更适合“等对象就绪”
+- 如果多个子应用都去写同一个 key，设计上就会乱，别这么玩
 
 ---
 
@@ -223,9 +246,8 @@ subscribeSharedData(store, 'userInfo', (event) => {
 
 - 基座 = 房东
 - store = 冰箱
-- Angular / React = 住户
-- 住户不是各自买冰箱，而是都用房东提供的同一个冰箱
-- 冰箱门上还能贴个牌子：loading / ready / error
-- 如果东西晚点到，先把空盒子放进去，后面再补货
+- 子应用 = 住户
+- 房东负责买菜、放菜、贴标签
+- 住户只管打开冰箱拿东西，或者等冰箱补货
 
-谁先把东西放进去，别人就能拿到。
+谁来做供给，谁来做消费，这个边界要清楚，不然以后肯定乱。
