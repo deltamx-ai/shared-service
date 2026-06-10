@@ -10,6 +10,8 @@
 - React 子应用也想马上用这份数据
 - 但又不想把数据挂到 `window` 上
 - 还希望这份数据只在当前基座运行期间有效
+- 有些共享对象一开始还没数据，得先占位，后面子项目再把数据补上
+- 其他人还要能知道它现在是 loading 还是 error，不能瞎猜
 
 所以我们让**基座应用**创建一个共享 `store`，再把同一个 `store` 实例传给 Angular 和 React 子应用。
 
@@ -45,6 +47,21 @@ const reactStore = store;
 - Angular `set` 一次
 - React 再 `get`
 - 拿到的就是同一份数据
+
+---
+
+## 新增能力
+
+这版补了几件事：
+
+- `loading / error / ready / idle` 状态
+- `wait(..., { timeoutMs })` 超时等待
+- `subscribe(...)` 订阅变更
+- `setLoading(...)` 先挂对象，后补数据
+- `setError(...)` 失败态回传
+- `setByPromise(...) / ensure(...)` 统一异步写入
+
+这就比较像“共享一个对象壳子”，壳子先放出去，数据之后慢慢挂上来。
 
 ---
 
@@ -94,7 +111,7 @@ flowchart LR
   C --> G[React 读取 store]
   G --> H{值是否已存在?}
   H -- 是 --> I[直接 get 到数据]
-  H -- 否 --> J[wait 等待 Promise]
+  H -- 否 --> J[wait 等待 Promise / 订阅变更]
   F --> K[set 时唤醒等待中的 resolver]
   K --> J
   J --> I
@@ -135,7 +152,10 @@ async loadUser() {
   await this.sharedMemory.ensure('userInfo', fetch('/api/user').then(res => res.json()));
 }
 
-const user = this.sharedMemory.get('userInfo');
+this.sharedMemory.setLoading('userInfo');
+this.sharedMemory.subscribe('userInfo', (event) => {
+  console.log(event.status, event.value, event.error);
+});
 ```
 
 ---
@@ -145,14 +165,8 @@ const user = this.sharedMemory.get('userInfo');
 React 子应用拿到同一个 store 后，直接读：
 
 ```tsx
-import {
-  createSharedMemoryStore,
-  setSharedData,
-  getSharedData,
-  waitSharedData,
-} from './react-usage-example';
-
 const store = createSharedMemoryStore();
+setSharedLoading(store, 'userInfo');
 setSharedData(store, 'userInfo', { id: 1, name: 'Tom' });
 const user = getSharedData(store, 'userInfo');
 ```
@@ -160,8 +174,16 @@ const user = getSharedData(store, 'userInfo');
 如果数据还没回来：
 
 ```tsx
-waitSharedData(store, 'userInfo').then((data) => {
-  console.log(data);
+waitSharedData(store, 'userInfo', { timeoutMs: 3000 })
+  .then((data) => {
+    console.log(data);
+  })
+  .catch((err) => {
+    console.error('wait timeout or error', err);
+  });
+
+subscribeSharedData(store, 'userInfo', (event) => {
+  console.log(event.status, event.value, event.error);
 });
 ```
 
@@ -175,6 +197,8 @@ waitSharedData(store, 'userInfo').then((data) => {
 - `Promise` 可以配合等待机制，避免重复请求
 - 有 schema 校验，避免脏数据直接进入共享 store
 - 类型从 schema 自动推导，不用维护两套
+- 有 loading / error / ready 状态，UI 能直接接住
+- 支持订阅变更，后续挂载数据很顺手
 
 ---
 
@@ -184,6 +208,7 @@ waitSharedData(store, 'userInfo').then((data) => {
 - 只要基座还在，这份内存就还在
 - 刷新页面后，store 需要由基座重新创建并重新注入
 - 它是运行时共享，不是持久化存储
+- `wait` 可以超时，但它不是消息队列；更适合“等对象就绪”
 
 ---
 
@@ -195,5 +220,7 @@ waitSharedData(store, 'userInfo').then((data) => {
 - store = 冰箱
 - Angular / React = 住户
 - 住户不是各自买冰箱，而是都用房东提供的同一个冰箱
+- 冰箱门上还能贴个牌子：loading / ready / error
+- 如果东西晚点到，先把空盒子放进去，后面再补货
 
 谁先把东西放进去，别人就能拿到。
